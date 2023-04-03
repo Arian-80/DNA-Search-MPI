@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    size_t currPatternLength;
+    size_t patternLength;
     size_t commonStartLength;
     size_t sequenceLength;
     int iLocal;
@@ -297,20 +297,21 @@ int main(int argc, char** argv) {
     for (int i = 0; i < portion; i++) {
         iLocal = i+start;
         sequenceLength = sequenceLengths[iLocal];
+        patternLength = patternLengths[iLocal][0];
         currentPatterns = patterns[iLocal];
-        currPatternLength = patternLengths[iLocal][0];
         // Estimating (x/y)/2 occurrences will be found, where x is the sequence length and y is the pattern length.
-        size_t estimatedOccurrences = sequenceLength/currPatternLength/2;
+        size_t estimatedOccurrences = sequenceLength / patternLength / 2;
+        if (!estimatedOccurrences) estimatedOccurrences = 1; // Estimate at least one occurrence
         foundMatches[i] = (int*) malloc(estimatedOccurrences * sizeof(int));
 //        CHECK TO MAKE SURE MALLOC ABOVE² AND REALLOC BELOW WORK, OTHERWISE FREE EVEYRTHING ABOVE... :)
-        char* commonStart = (char*) malloc(currPatternLength * sizeof(char));
+        char* commonStart = (char*) malloc(patternLength * sizeof(char));
         if (patternCount[iLocal] == 1) commonStart = currentPatterns[0];
         else {
-            for (int j = 0; j < currPatternLength; j++) {
+            for (int j = 0; j < patternLength; j++) {
                 for (int a = 1; a < patternCount[iLocal]; a++) {
                     if (currentPatterns[a][j] != currentPatterns[a - 1][j]) {
                         commonStart[j] = '\0';
-                        j = currPatternLength; // End outer loop - factor whole loop into function later and return instead
+                        j = patternLength; // End outer loop - factor whole loop into function later and return instead
                         break;
                     }
                 }
@@ -320,21 +321,37 @@ int main(int argc, char** argv) {
         matchCounter[i] = 0;
         commonStartLength = strlen(commonStart);
         char* temp = sequences[i];
-        while (temp[0] != '\0') {
-            char* currentMatch = strstr(temp, commonStart);
-            if (!currentMatch) break; // Not found
+        int found;
+        while (temp[0] != '\0') { // End of sequence
+            char* commonStartMatch = strstr(temp, commonStart); // Shortcut - initially only look for common start
+            if (!commonStartMatch) break; // Not found
+            for (int j = 0; j < patternCount[iLocal]; j++) {
+                found = 1;
+                for (int a = commonStartLength; a < patternLength; a++) {
+                    if (commonStartMatch[a] != currentPatterns[j][a]) {
+                        found = 0;
+                        break;
+                    }
+                }
+                if (found) {
+                    foundMatches[i][matchCounter[i]] = (int) (commonStartMatch - sequences[i]);
+                    temp = &(temp[commonStartMatch - temp + patternLength]);
+                    matchCounter[i]++;
+                    break;
+                }
+            }
+            if (!found) temp = &temp[1]; // Skip one character to remove the already-found common start
             if (matchCounter[i] >= estimatedOccurrences) {
                 estimatedOccurrences*=2;
                 foundMatches[i] = realloc(foundMatches[i], estimatedOccurrences*sizeof(int));
             }
-            foundMatches[i][matchCounter[i]] = (int) (currentMatch - sequences[i]); // Index of first found instance
-            temp = &(sequences[i][foundMatches[i][matchCounter[i]]+commonStartLength]); // Skip the matched part
-            matchCounter[i]++;
         }
     }
 
 
     // Consider getting rid of sequenceLength
+    // Consider making patternLengths a 1d array instead of 2d.
+    // Patterns for the same sequences are of the same length always, so 1d array of length 'portion' suffices.
     // FREE COMMONSTART
     for (int i = 0; i < portion; i++) {
         for (int j = 0; j < matchCounter[i]; j++) {
