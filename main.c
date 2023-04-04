@@ -16,81 +16,64 @@ void getDistributions(int *start, int *portion, int *remainder, int size,
     }
 }
 
-void free2DArray(void** array, size_t length) {
+void free_inner_2DArray(void** array, size_t length) {
     for (int i = 0; i < length; i++) {
         free(array[i]);
     }
+}
+
+void free_full_2DArray(void** array, int length) {
+    free_inner_2DArray(array, length);
     free(array);
 }
 
-int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
 
-    FILE *file;
-    file = fopen("sequences.txt", "r");
-    if (!file) {
-        printf("File not found.\n");
-        return -1;
-    }
-
-    int sequenceCount = 0;
-    int maxSequenceLength = 0;
-    fscanf(file, "%d", &sequenceCount);
-    fscanf(file, "%d", &maxSequenceLength);
-
-    if (!sequenceCount || sequenceCount < 0 ||
-    !maxSequenceLength || maxSequenceLength < 0) {
-        printf("Invalid input.\n");
-        return -1;
-    }
-
-    char*** patterns = (char***) malloc(sequenceCount * sizeof(char**));
-    if (!patterns) return -1;
-
-    size_t** patternLengths = (size_t**) malloc(sequenceCount * sizeof(size_t*));
-    if (!patternLengths) {
-        free(patterns);
-        return -1;
-    }
-
-    // Rough estimation that all patterns include 3 variations.
-    size_t estimatedPatternCount = 3;
-    for (int i = 0; i < sequenceCount; i++) {
-        patterns[i] = (char **) malloc(estimatedPatternCount * sizeof(char *));
-        if (!patterns[i]) {
-            free2DArray((void**) patterns, i);
-            free2DArray((void**) patternLengths, i);
-            return -1;
+int malloc_pattern_arrays(char*** array1, size_t** array2, size_t elementCount, int repeat) {
+    // The function parameters are specific for less complexity as this is the only purpose they are used for.
+    for (int i = 0; i < repeat; i++) {
+        array1[i] = (char **) malloc(elementCount * sizeof(char *));
+        if (!array1[i]) {
+            free_full_2DArray((void**) array1, i);
+            free_full_2DArray((void**) array2, i);
+            return 0;
         }
-        patternLengths[i] = (size_t*) malloc(estimatedPatternCount * sizeof(size_t));
-        if (!patternLengths[i]) {
-            free2DArray((void**) patterns, i+1);
-            free2DArray((void**) patternLengths, i);
-            return -1;
+        array2[i] = (size_t*) malloc(elementCount * sizeof(size_t));
+        if (!array2[i]) {
+            free_full_2DArray((void**) array1, i+1);
+            free_full_2DArray((void**) array2, i);
+            return 0;
         }
     }
+    return 1;
+}
 
-    int patternCount[sequenceCount];
+void free_pattern_arrays(char*** patterns, size_t** patternLengths,
+                         int repeats, int size, int* patternCount) {
+    for (int i = 0; i < repeats; i++) {
+        free_inner_2DArray((void**) patterns[i], patternCount[i]);
+    }
+    free_full_2DArray((void**) patterns, size);
+    free_full_2DArray((void**) patternLengths, size);
+}
 
-    char patternBuffer[255];
-    size_t currentLength;
+FILE* getFile(char* fileName) {
+    FILE* file = fopen(fileName, "r");
+    return file;
+}
+
+int distinguishPatterns(FILE* file, char*** patterns, size_t** patternLengths,
+                        int sequenceCount, size_t estimatedPatternCount,
+                        int* patternCount, int rank) {
+    char patternBuffer[255]; // Max length of a pattern
     int activeBracket = 0;
     int k;
     int currentVariations;
+    size_t currentLength;
     char currentLetter;
     for (int i = 0; i < sequenceCount; i++){
         fscanf(file, "%s", patternBuffer);
         currentLength = strlen(patternBuffer);
-        if (!currentLength) {
-            for (int a = 0; a < i; a++) {
-                free2DArray((void**) patterns[a], patternCount[a]);
-            }
-            free2DArray((void**) patterns, sequenceCount);
-            free2DArray((void**) patternLengths, sequenceCount);
-            return -1;
-        }
         char withoutVariation[currentLength]; // Pattern before variable input
-        estimatedPatternCount = 3;
         currentVariations = 0;
         k = 0;
         for (int j = 0; j < currentLength; j++) {
@@ -98,31 +81,30 @@ int main(int argc, char** argv) {
             if (currentLetter == '[') {
                 // Embedded brackets or more than one variation in the same pattern
                 if (activeBracket || currentVariations) {
-                    printf("Pattern %d is invalid.\n Embedded brackets are not"
-                           " allowed and only one variation is permitted"
-                           " within each pattern.\n", i);
-                    for (int a = 0; a < i; a++) {
-                        free2DArray((void**) patterns[a], patternCount[a]);
+                    if (!rank) {
+                        printf("Pattern %d is invalid.\nEmbedded brackets are not"
+                               " allowed and only one variation is permitted"
+                               " within each pattern.\n", i);
                     }
-                    free2DArray((void**) patterns, sequenceCount);
-                    free2DArray((void**) patternLengths, sequenceCount);
-                    return -1;
+                    free_pattern_arrays(patterns, patternLengths, i,
+                                        sequenceCount, patternCount);
+                    return 0;
                 }
+                withoutVariation[k] = '\0';
                 activeBracket++;
                 continue;
             }
             if (currentLetter == ']') {
                 // No corresponding open bracket, or empty bracket
                 if (!activeBracket || !currentVariations) {
-                    printf("Pattern %d is invalid.\nClosing brackets "
-                           "must have corresponding opening brackets and "
-                           "brackets may not be empty.\n", i);
-                    for (int a = 0; a < i; a++) {
-                        free2DArray((void**) patterns[a], patternCount[a]);
+                    if (!rank) {
+                        printf("Pattern %d is invalid.\nClosing brackets "
+                               "must have corresponding opening brackets and "
+                               "brackets may not be empty.\n", i);
                     }
-                    free2DArray((void**) patterns, sequenceCount);
-                    free2DArray((void**) patternLengths, sequenceCount);
-                    return -1;
+                    free_pattern_arrays(patterns, patternLengths, i,
+                                        sequenceCount, patternCount);
+                    return 0;
                 }
                 // Variation within current pattern already exists - limited to 1.
                 activeBracket--;
@@ -131,37 +113,26 @@ int main(int argc, char** argv) {
             }
             if (activeBracket) {
                 if (currentVariations == estimatedPatternCount) {
-                    estimatedPatternCount *= 2;
                     patterns[i] = (char**) realloc(
-                            patterns[i],estimatedPatternCount * sizeof(char*));
-                    if (!patterns[i]) {
-                        for (int a = 0; a < i; a++) {
-                            free2DArray((void**) patterns[a], patternCount[a]);
-                        }
-                        free2DArray((void**) patterns, sequenceCount);
-                        free2DArray((void**) patternLengths, sequenceCount);
-                        return -1;
-                    }
-                    patternLengths[i] = (size_t*) realloc(patternLengths[i],
-                                                          estimatedPatternCount * sizeof(size_t));
-                    if (!patternLengths[i]) {
-                        for (int a = 0; a < i; a++) {
-                            free2DArray((void**) patterns[a], patternCount[a]);
-                        }
-                        free2DArray((void**) patterns, sequenceCount);
-                        free2DArray((void**) patternLengths, sequenceCount);
-                        return -1;
+                            patterns[i],currentVariations*2 * sizeof(char*));
+
+                    patternLengths[i] = (size_t*) realloc(
+                            patternLengths[i],currentVariations*2 * sizeof(size_t));
+
+                    if (!patterns[i] || !patternLengths[i] ||
+                        patterns[i][currentVariations]) {
+                        free_pattern_arrays(patterns, patternLengths, i,
+                                            sequenceCount, patternCount);
+                        return 0;
                     }
                 }
                 // currentLength is either the whole length or includes 2 brackets.
-                patterns[i][currentVariations] = (char*) malloc((currentLength-2+1) * sizeof(char));
+                patterns[i][currentVariations] = (char*)
+                        malloc((currentLength-2+1) * sizeof(char));
                 if (!patterns[i][currentVariations]) {
-                    for (int a = 0; a < i; a++) {
-                        free2DArray((void**) patterns[a], patternCount[a]);
-                    }
-                    free2DArray((void**) patterns, sequenceCount);
-                    free2DArray((void**) patternLengths, sequenceCount);
-                    return -1;
+                    free_pattern_arrays(patterns, patternLengths, i,
+                                        sequenceCount, patternCount);
+                    return 0;
                 }
                 // Store one variation of the pattern
                 strncpy(patterns[i][currentVariations], withoutVariation, k);
@@ -174,29 +145,17 @@ int main(int argc, char** argv) {
                 withoutVariation[k] = currentLetter;
                 k++;
             }
-            // hello[123]he hello1he hello2he hello3he
-            // hello[1]a
         }
         withoutVariation[k] = '\0';
         if (!currentVariations) {
             patterns[i] = (char**) realloc(patterns[i], 1 * sizeof(char*));
-            if (!patterns[i]) {
-                for (int j = 0; j < i; j++) {
-                    free2DArray((void**) patterns[j], patternCount[j]);
-                }
-                free2DArray((void**) patterns, sequenceCount);
-                free2DArray((void**) patternLengths, sequenceCount);
-                return -1;
+            if (patterns[i]) {
+                patterns[i][0] = (char*) malloc((k+1) * sizeof(char));
             }
-
-            patterns[i][0] = (char*) malloc((k+1) * sizeof(char));
-            if (!patterns[i][0]) {
-                for (int j = 0; j < i; j++) {
-                    free2DArray((void**) patterns[j], patternCount[j]);
-                }
-                free2DArray((void**) patterns, sequenceCount);
-                free2DArray((void**) patternLengths, sequenceCount);
-                return -1;
+            if (!patterns[i] || !patterns[i][0]) {
+                free_pattern_arrays(patterns, patternLengths, i,
+                                    sequenceCount, patternCount);
+                return 0;
             }
             strncpy(patterns[i][0], withoutVariation, k+1);
             patternLengths[i][0] = k;
@@ -211,58 +170,102 @@ int main(int argc, char** argv) {
             }
             patternLengths[i][j] = currentLength;
             patterns[i][j] = (char*) realloc(patterns[i][j],
-                                  (currentLength + 1) * sizeof(char));
+                                             (currentLength + 1) * sizeof(char));
             if (!patterns[i][j]) {
-                for (k = 0; k < i; k++) {
-                    free2DArray((void**) patterns[k], patternCount[k]);
-                }
-                free2DArray((void**) patterns, sequenceCount);
-                free2DArray((void**) patternLengths, sequenceCount);
-                return -1;
+                free_pattern_arrays(patterns, patternLengths, i,
+                                    sequenceCount, patternCount);
+                return 0;
             }
         }
         patternCount[i] = currentVariations;
     }
+    return 1;
+}
 
-    char** sequences = (char**) malloc(sequenceCount * sizeof(char*));
-    if (!sequences) {
-        for (int i = 0; i < sequenceCount; k++) {
-            free2DArray((void**) patterns[i], patternCount[i]);
-        }
-        free2DArray((void**) patterns, sequenceCount);
-        free2DArray((void**) patternLengths, sequenceCount);
-        return -1;
-    }
-
-    size_t sequenceLengths[sequenceCount];
+int parseSequences(FILE* file, char** sequences, int sequenceCount, int maxSequenceLength) {
     char seqBuffer[maxSequenceLength+1];
+    size_t currentLength;
     for (int i = 0; i < sequenceCount; i++) {
         fscanf(file, "%s", seqBuffer);
         currentLength = strlen(seqBuffer);
-        sequenceLengths[i] = currentLength;
         sequences[i] = (char*) malloc(currentLength * sizeof(char));
         if (!sequences[i]) {
-            for (int j = 0; j < sequenceCount; j++) {
-                free2DArray((void**) patterns[j], patternCount[j]);
-            }
-            free2DArray((void**) patterns, sequenceCount);
-            free2DArray((void**) patternLengths, sequenceCount);
-            free2DArray((void**) sequences, i); // Free all up to i
-            return -1;
+            free_full_2DArray((void**) sequences, i); // Free all up to i
+            return 0;
         }
         seqBuffer[currentLength] = '\0';
         strncpy(sequences[i], seqBuffer, currentLength+1);
     }
+    return 1;
+}
 
-    /* Testing
-    for (int i = 0; i < sequenceCount; i++) {
-        printf("i: %d\tSequence: %s\tPatternCount: %d\n", i, sequences[i], patternCount[i]);
-        for (int j = 0; j < patternCount[i]; j++) {
-            printf("Pattern: %s\tPatternLength: %d\n", patterns[i][j], patternLengths[i][j]);
+int truncateSequences(char** sequences, int portion, int start) {
+    size_t truncatedSize = portion*sizeof(char*);
+    memcpy(&sequences[0], &sequences[start], truncatedSize);
+    sequences = (char**) realloc(sequences, truncatedSize);
+    if (!sequences) {
+        return 0;
+    }
+    return 1;
+}
+
+void findCommonStart(char* commonStart, char** patterns, size_t patternLength,
+                     int index, const int* patternCount) {
+    for (int j = 0; j < patternLength; j++) {
+        for (int k = 1; k < patternCount[index]; k++) {
+            if (patterns[k][j] != patterns[k - 1][j]) {
+                commonStart[j] = '\0';
+                j = patternLength; // End outer loop - factor whole loop into function later and return instead
+                break;
+            }
+            commonStart[j] = patterns[0][j]; // index 0 is allowed because all instances of the first letter are the same per the above loop
+        }
+    }
+}
+
+void calculateEstimatedOccurrence(char** sequences, int index,
+                                  size_t patternLength, int* estimatedOccurrences) {
+    size_t sequenceLength = strlen(sequences[index]);
+    // Estimating (x/y)/2 occurrences will be found, where x is the sequence length and y is the pattern length.
+    (*estimatedOccurrences) = sequenceLength / patternLength / 2;
+    if (!(*estimatedOccurrences)) (*estimatedOccurrences) = 1; // Estimate at least one occurrence
+}
+
+int patternMatchCommonStart(int patternCount, size_t commonStartLength,
+                            size_t patternLength, const char* matchedString,
+                            char** patterns) {
+    for (int j = 0; j < patternCount; j++) {
+        for (int k = commonStartLength; k < patternLength; k++) {
+            if (matchedString[k] != patterns[j][k]) {
+                break;
+            }
+            if (k == patternLength-1) return 1; // Found
         }
     }
     return 0;
-     */
+}
+
+
+int main(int argc, char** argv) {
+    FILE *file = getFile("sequences.txt");
+    if (!file) {
+        printf("File not found.\n");
+        return -1;
+    }
+
+    MPI_Init(&argc, &argv);
+
+    int sequenceCount = 0;
+    int maxSequenceLength = 0;
+    fscanf(file, "%d", &sequenceCount);
+    fscanf(file, "%d", &maxSequenceLength);
+
+    if (!sequenceCount || sequenceCount < 0 ||
+    !maxSequenceLength || maxSequenceLength < 0) {
+        printf("Invalid input.\n");
+        MPI_Finalize();
+        return -1;
+    }
 
     int rank, processorCount;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -275,49 +278,91 @@ int main(int argc, char** argv) {
     getDistributions(&start, &portion, &remainder, sequenceCount,
                      processorCount, groupRank);
 
-    size_t truncatedSize = portion*sizeof(char*);
-    memcpy(&sequences[0], &sequences[start], truncatedSize);
-    sequences = (char**) realloc(sequences, truncatedSize);
+
+    char*** patterns = (char***) malloc(sequenceCount * sizeof(char**));
+    if (!patterns) return -1;
+
+    size_t** patternLengths = (size_t**) malloc(sequenceCount * sizeof(size_t*));
+    if (!patternLengths) {
+        free(patterns);
+        return -1;
+    }
+
+    // Rough estimation that all patterns include 3 variations.
+    size_t estimatedPatternCount = 3;
+    if (!malloc_pattern_arrays(patterns, patternLengths,
+                   estimatedPatternCount, sequenceCount)) {
+        MPI_Finalize();
+        return -1;
+    }
+
+    int patternCount[sequenceCount]; // Number of patterns for each sequence
+    // Separate out pattern variations
+    if (!distinguishPatterns(file, patterns, patternLengths, sequenceCount,
+                             estimatedPatternCount, patternCount, rank)) {
+        MPI_Finalize();
+        return -1;
+    }
+
+    char** sequences = (char**) malloc(sequenceCount * sizeof(char*));
     if (!sequences) {
-        for (int j = 0; j < sequenceCount; j++) {
-            free2DArray((void**) patterns[j], patternCount[j]);
-        }
-        free2DArray((void**) patterns, sequenceCount);
-        free2DArray((void**) patternLengths, sequenceCount);
+        free_pattern_arrays(patterns, patternLengths, sequenceCount,
+                            sequenceCount, patternCount);
+        MPI_Finalize();
+        return -1;
+    }
+
+    // Fill "sequences" array with sequences found in the file.
+    if (!parseSequences(file, sequences, sequenceCount, maxSequenceLength)) {
+        free_pattern_arrays(patterns, patternLengths, sequenceCount,
+                            sequenceCount, patternCount);
+        MPI_Finalize();
+        return -1;
+    }
+
+    if (!truncateSequences(sequences, portion, start)) {
+        free_pattern_arrays(patterns, patternLengths, sequenceCount,
+                            sequenceCount, patternCount);
+        MPI_Finalize();
         return -1;
     }
 
     size_t patternLength;
     size_t commonStartLength;
-    size_t sequenceLength;
     int iLocal;
     char** currentPatterns;
     int** foundMatches = (int**) malloc(portion * sizeof(int*));
+    if (!foundMatches) {
+        free_pattern_arrays(patterns, patternLengths, sequenceCount,
+                            sequenceCount, patternCount);
+        MPI_Finalize();
+        return -1;
+    }
     int matchCounter[portion];
     for (int i = 0; i < portion; i++) {
         iLocal = i+start;
-        sequenceLength = sequenceLengths[iLocal];
         patternLength = patternLengths[iLocal][0];
         currentPatterns = patterns[iLocal];
-        // Estimating (x/y)/2 occurrences will be found, where x is the sequence length and y is the pattern length.
-        size_t estimatedOccurrences = sequenceLength / patternLength / 2;
-        if (!estimatedOccurrences) estimatedOccurrences = 1; // Estimate at least one occurrence
+
+        int estimatedOccurrences;
+        calculateEstimatedOccurrence(sequences, i,
+                                     patternLength,&estimatedOccurrences);
+
         foundMatches[i] = (int*) malloc(estimatedOccurrences * sizeof(int));
-//        CHECK TO MAKE SURE MALLOC ABOVE² AND REALLOC BELOW WORK, OTHERWISE FREE EVEYRTHING ABOVE... :)
-        char* commonStart = (char*) malloc(patternLength * sizeof(char));
-        if (patternCount[iLocal] == 1) commonStart = currentPatterns[0];
-        else {
-            for (int j = 0; j < patternLength; j++) {
-                for (int a = 1; a < patternCount[iLocal]; a++) {
-                    if (currentPatterns[a][j] != currentPatterns[a - 1][j]) {
-                        commonStart[j] = '\0';
-                        j = patternLength; // End outer loop - factor whole loop into function later and return instead
-                        break;
-                    }
-                }
-                commonStart[j] = currentPatterns[0][j]; // index 0 is allowed because all instances of the first letter are the same per the above loop
-            }
+        char commonStart[patternLength];
+        if (!foundMatches[i]) {
+            free_pattern_arrays(patterns, patternLengths,
+                                sequenceCount, sequenceCount, patternCount);
+            free_full_2DArray((void**) foundMatches, i);
+            MPI_Finalize();
+            return -1;
         }
+
+        if (patternCount[iLocal] == 1) strcpy(commonStart, currentPatterns[0]);
+        else {
+            findCommonStart(commonStart, currentPatterns, patternLength, iLocal, patternCount);
+        }
+
         matchCounter[i] = 0;
         commonStartLength = strlen(commonStart);
         char* temp = sequences[i];
@@ -325,46 +370,41 @@ int main(int argc, char** argv) {
         while (temp[0] != '\0') { // End of sequence
             char* commonStartMatch = strstr(temp, commonStart); // Shortcut - initially only look for common start
             if (!commonStartMatch) break; // Not found
-            for (int j = 0; j < patternCount[iLocal]; j++) {
-                found = 1;
-                for (int a = commonStartLength; a < patternLength; a++) {
-                    if (commonStartMatch[a] != currentPatterns[j][a]) {
-                        found = 0;
-                        break;
-                    }
-                }
-                if (found) {
-                    foundMatches[i][matchCounter[i]] = (int) (commonStartMatch - sequences[i]);
-                    temp = &(temp[commonStartMatch - temp + patternLength]);
-                    matchCounter[i]++;
-                    break;
-                }
+            found = patternMatchCommonStart(patternCount[iLocal], commonStartLength,
+                                            patternLength, commonStartMatch,
+                                            currentPatterns);
+            if (found) {
+                foundMatches[i][matchCounter[i]] = (int) (commonStartMatch - sequences[i]);
+                temp = &(temp[commonStartMatch - temp + patternLength]);
+                matchCounter[i]++;
             }
-            if (!found) temp = &temp[1]; // Skip one character to remove the already-found common start
-            if (matchCounter[i] >= estimatedOccurrences) {
+            else temp = &temp[1]; // Skip one character to remove the already-found common start
+            if (matchCounter[i] >= estimatedOccurrences) { // Enlarge array
                 estimatedOccurrences*=2;
                 foundMatches[i] = realloc(foundMatches[i], estimatedOccurrences*sizeof(int));
+                if (!foundMatches) {
+                    free_pattern_arrays(patterns, patternLengths,sequenceCount,
+                                        sequenceCount, patternCount);
+                    free_full_2DArray((void**) sequences, sequenceCount);
+                    free(foundMatches);
+                    MPI_Finalize();
+                    return -1;
+                }
             }
         }
     }
 
 
-    // Consider getting rid of sequenceLength
     // Consider making patternLengths a 1d array instead of 2d.
     // Patterns for the same sequences are of the same length always, so 1d array of length 'portion' suffices.
-    // FREE COMMONSTART
     for (int i = 0; i < portion; i++) {
         for (int j = 0; j < matchCounter[i]; j++) {
             printf("Rank: %d, match[%d]: %d\n", rank, j, foundMatches[i][j]);
         }
     }
-
-    for (int j = 0; j < sequenceCount; j++) {
-        free2DArray((void**) patterns[j], patternCount[j]);
-    }
-    free(patterns);
-    free2DArray((void**) patternLengths, sequenceCount);
-    free2DArray((void**) sequences, portion);
+    free_pattern_arrays(patterns, patternLengths, sequenceCount,
+                        sequenceCount, patternCount);
+    free_full_2DArray((void**) sequences, portion);
 
     MPI_Finalize();
     return 0;
