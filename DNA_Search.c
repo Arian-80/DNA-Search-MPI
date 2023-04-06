@@ -246,11 +246,10 @@ void calculateEstimatedOccurrence(char** sequences, int index,
     if (!(*estimatedOccurrences)) (*estimatedOccurrences) = 1; // Estimate at least one occurrence
 }
 
-int patternMatchCommonStart(int patternCount, size_t commonStartLength,
-                            size_t patternLength, const char* matchedString,
-                            char** patterns) {
+int patternMatchCommonStart(int patternCount, size_t patternLength,
+                            const char* matchedString, char** patterns) {
     for (int j = 0; j < patternCount; j++) {
-        for (int k = commonStartLength; k < patternLength; k++) {
+        for (int k = 0; k < patternLength; k++) {
             if (matchedString[k] != patterns[j][k]) {
                 break;
             }
@@ -264,22 +263,21 @@ int findMatches(char** sequences, char** currentPatterns, char* commonStart,
                 int** foundMatches, int* patternCount, int* currMatchCounter,
                 int* totalMatches, int currIndex, int localIndex,
                 size_t* currentSize, size_t patternLength) {
-    size_t commonStartLength = strlen(commonStart);
     char* temp = sequences[currIndex];
     int found;
     while (temp[0] != '\0') { // End of sequence
         char* commonStartMatch = strstr(temp, commonStart); // Shortcut - initially only look for common start
         if (!commonStartMatch) break; // Not found
-        found = patternMatchCommonStart(patternCount[localIndex], commonStartLength,
+        found = patternMatchCommonStart(patternCount[localIndex],
                                         patternLength, commonStartMatch,
                                         currentPatterns);
         if (found) {
-            (*foundMatches)[*currMatchCounter] = (int) (commonStartMatch - sequences[currIndex]);
+            (*foundMatches)[*totalMatches] = (int) (commonStartMatch - sequences[currIndex]);
             temp = &(temp[commonStartMatch - temp + 1]);
-            (*currMatchCounter)++;
+            (*totalMatches)++; (*currMatchCounter)++;
         }
         else temp = &temp[1]; // Skip one character to remove the already-found common start
-        if (*currMatchCounter >= *currentSize) { // Enlarge array
+        if (*totalMatches >= *currentSize) { // Enlarge array
             (*currentSize)*=2;
             *foundMatches = (int*) realloc(*foundMatches, (*currentSize)*sizeof(int));
             if (!*foundMatches) {
@@ -287,7 +285,6 @@ int findMatches(char** sequences, char** currentPatterns, char* commonStart,
             }
         }
     }
-    (*totalMatches) += (*currMatchCounter);
     return 1;
 }
 
@@ -474,6 +471,11 @@ int main(int argc, char** argv) {
         return -1;
     }
 
+    MPI_Comm communicator = MPI_COMM_WORLD;
+    if (processorCount > sequenceCount) {
+        MPI_Comm_split(MPI_COMM_WORLD, groupRank, rank, &communicator);
+    }
+
 
     int matchCounter[portion];
     int* foundMatches;
@@ -515,7 +517,7 @@ int main(int argc, char** argv) {
         free(displs);
         int k = 0;
         for (int i = 0; i < sequenceCount; i++) {
-            printf("Occurrences found in sequence %d: %d\n", i, combinedCount[i]);
+            printf("Occurrences found in sequence %d: %d\n", i+1, combinedCount[i]);
             for (int j = 0; j < combinedCount[i]; j++) {
                 printf("Occurrence %d: Index %d\n", j+1, combinedMatches[k]);
                 k++;
