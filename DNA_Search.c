@@ -214,11 +214,11 @@ int parseSequences(FILE* file, char** sequences, int sequenceCount, int maxSeque
     return 1;
 }
 
-int truncateSequences(char** sequences, int portion, int start) {
+int truncateSequences(char*** sequences, int portion, int start) {
     size_t truncatedSize = portion*sizeof(char*);
-    memcpy(&sequences[0], &sequences[start], truncatedSize);
-    sequences = (char**) realloc(sequences, truncatedSize);
-    if (!sequences) {
+    memcpy(*sequences, &(*sequences)[start], truncatedSize);
+    *sequences = (char**) realloc(*sequences, truncatedSize);
+    if (!*sequences) {
         return 0;
     }
     return 1;
@@ -238,14 +238,6 @@ void findCommonStart(char* commonStart, char** patterns, size_t patternLength,
     }
 }
 
-void calculateEstimatedOccurrence(char** sequences, int index,
-                                  size_t patternLength, int* estimatedOccurrences) {
-    size_t sequenceLength = strlen(sequences[index]);
-    // Estimating (x/y)/2 occurrences will be found, where x is the sequence length and y is the pattern length.
-    (*estimatedOccurrences) = sequenceLength / patternLength / 2;
-    if (!(*estimatedOccurrences)) (*estimatedOccurrences) = 1; // Estimate at least one occurrence
-}
-
 int patternMatchCommonStart(int patternCount, size_t patternLength,
                             const char* matchedString, char** patterns) {
     for (int j = 0; j < patternCount; j++) {
@@ -259,11 +251,11 @@ int patternMatchCommonStart(int patternCount, size_t patternLength,
     return 0;
 }
 
-int findMatches(char** sequences, char** currentPatterns, char* commonStart,
+int findMatches(char* sequence, char** currentPatterns, char* commonStart,
                 int** foundMatches, int* patternCount, int* currMatchCounter,
-                int* totalMatches, int currIndex, int localIndex,
+                int* totalMatches, int localIndex,
                 size_t* currentSize, size_t patternLength) {
-    char* temp = sequences[currIndex];
+    char* temp = sequence;
     int found;
     while (temp[0] != '\0') { // End of sequence
         char* commonStartMatch = strstr(temp, commonStart); // Shortcut - initially only look for common start
@@ -272,7 +264,7 @@ int findMatches(char** sequences, char** currentPatterns, char* commonStart,
                                         patternLength, commonStartMatch,
                                         currentPatterns);
         if (found) {
-            (*foundMatches)[*totalMatches] = (int) (commonStartMatch - sequences[currIndex]);
+            (*foundMatches)[*totalMatches] = (int) (commonStartMatch - sequence);
             temp = &(temp[commonStartMatch - temp + 1]);
             (*totalMatches)++; (*currMatchCounter)++;
         }
@@ -288,10 +280,86 @@ int findMatches(char** sequences, char** currentPatterns, char* commonStart,
     return 1;
 }
 
-int manageMatches(int portion, int start, int sequenceCount, int* totalMatches,
-                  int* patternCount, int* matchCounter,  int** foundMatches,
-                  const size_t* patternLengths, char*** patterns,
-                  char** sequences) {
+void getDispls(int** displs, const int* recvcounts, int processorCount) {
+    // Work out displacements
+    (*displs)[0] = 0;
+    for (int i = 1; i < processorCount; i++) {
+        (*displs)[i] = recvcounts[i - 1] + (*displs)[i - 1];
+    }
+}
+
+int parallel_manageMatches(MPI_Comm communicator, char*** patterns,
+                            char** sequence, int** foundMatches,
+                            const size_t* patternLengths, int* totalMatches,
+                            int* patternCount, int* matchCounter,
+                            int start, size_t* currentSize) {
+    // If parallel then portion is 1 sequence for each processor
+    int rank, processorCount, localPortion, localStart, remainder;
+    MPI_Comm_rank(communicator, &rank);
+    MPI_Comm_size(communicator, &processorCount);
+    int sequenceLength = (int) strlen(*sequence);
+    getDistributions(&localStart, &localPortion, &remainder, sequenceLength,
+                     processorCount, rank);
+
+    size_t patternLength = patternLengths[start];
+    // Start earlier in case split is at a matching case
+    if (rank) {
+        localStart -= (int) patternLength-1;
+        localPortion += (int) patternLength-1;
+    }
+    memcpy(*sequence, &(*sequence)[localStart], localPortion*sizeof(char));
+    *sequence = (char*) realloc(*sequence, (localPortion+1) * sizeof(char));
+    if (!*sequence) return 0;
+    (*sequence)[localPortion] = '\0';
+
+    char** currentPatterns = patterns[start];
+    char commonStart[patternLength];
+
+    if (patternCount[start] == 1) strcpy(commonStart, currentPatterns[0]);
+    else {
+        findCommonStart(commonStart, currentPatterns, patternLength,
+                        start, patternCount);
+    }
+    matchCounter[0] = 0;
+    if (!findMatches(*sequence, currentPatterns, commonStart, foundMatches,
+                     patternCount, &matchCounter[0], totalMatches, start,
+                     currentSize, patternLength)) {
+        free(*foundMatches);
+        return 0;
+    }
+    // Index relative to full sequence.
+    for (int i = 0; i < *totalMatches; i++) {
+        (*foundMatches)[i] += localStart; // 0123456789
+    }
+    if (!rank) {
+        int matchesFound[processorCount];
+        MPI_Reduce(MPI_IN_PLACE, totalMatches, 1, MPI_INT, MPI_SUM, 0, communicator);
+        // Need individual matches found, hence using gather instead of reduce.
+        MPI_Gather(&matchCounter[0], 1, MPI_INT, matchesFound, 1, MPI_INT, 0,
+                   communicator);
+        matchCounter[0] = *totalMatches;
+        *foundMatches = (int*) realloc(*foundMatches, matchCounter[0]*sizeof(int));
+        int* displs = (int*) malloc(processorCount * sizeof(int));
+        getDispls(&displs, matchesFound, processorCount);
+        MPI_Gatherv(MPI_IN_PLACE, 0, MPI_INT, *foundMatches, matchesFound,
+                    displs, MPI_INT, 0, communicator);
+        free(displs);
+    }
+    else {
+        MPI_Reduce(totalMatches, NULL, 1, MPI_INT, MPI_SUM, 0, communicator);
+        MPI_Gather(&matchCounter[0], 1, MPI_INT, NULL, 1, MPI_INT, 0,
+                   communicator);
+        MPI_Gatherv(*foundMatches, matchCounter[0], MPI_INT, NULL, NULL,NULL,
+                    MPI_INT, 0, communicator);
+    }
+    return 1;
+}
+
+int manageMatches(int parallel, int portion, int start, int sequenceCount,
+                  int* totalMatches, int* patternCount, int* matchCounter,
+                  int** foundMatches, const size_t* patternLengths,
+                  char*** patterns, char** sequences,
+                  MPI_Comm communicator) {
     char** currentPatterns;
     size_t patternLength;
     int iLocal;
@@ -302,6 +370,17 @@ int manageMatches(int portion, int start, int sequenceCount, int* totalMatches,
     (*foundMatches) = (int*) malloc(currentSize * sizeof(int));
     if (!*foundMatches) {
         return 0;
+    }
+
+    if (parallel) {
+        if (!parallel_manageMatches(communicator, patterns, &sequences[0],
+                                    foundMatches, patternLengths, totalMatches,
+                                    patternCount, matchCounter, start,
+                                    &currentSize)) {
+            free(*foundMatches);
+            return 0;
+        }
+        return 1;
     }
 
     for (int i = 0; i < portion; i++) {
@@ -315,22 +394,14 @@ int manageMatches(int portion, int start, int sequenceCount, int* totalMatches,
                             iLocal, patternCount);
         }
         matchCounter[i] = 0;
-        if (!findMatches(sequences, currentPatterns, commonStart, foundMatches,
-                    patternCount, &matchCounter[i], totalMatches, i, iLocal,
+        if (!findMatches(sequences[i], currentPatterns, commonStart, foundMatches,
+                    patternCount, &matchCounter[i], totalMatches, iLocal,
                     &currentSize, patternLength)) {
             free(*foundMatches);
             return 0;
         }
     }
     return 1;
-}
-
-void getDispls(int** displs, const int* recvcounts, int processorCount) {
-    // Work out displacements
-    (*displs)[0] = 0;
-    for (int i = 1; i < processorCount; i++) {
-        (*displs)[i] = recvcounts[i - 1] + (*displs)[i - 1];
-    }
 }
 
 int getCombinedCounts(int** combinedMatchCount, int** individualCounts,
@@ -455,7 +526,6 @@ int main(int argc, char** argv) {
         MPI_Finalize();
         return -1;
     }
-
     // Fill "sequences" array with sequences found in the file.
     if (!parseSequences(file, sequences, sequenceCount, maxSequenceLength)) {
         free_pattern_arrays(patterns, patternLengths, sequenceCount,
@@ -464,26 +534,27 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    if (!truncateSequences(sequences, portion, start)) {
+    if (!truncateSequences(&sequences, portion, start)) {
         free_pattern_arrays(patterns, patternLengths, sequenceCount,
                             sequenceCount, patternCount);
         MPI_Finalize();
         return -1;
     }
 
-    MPI_Comm communicator = MPI_COMM_WORLD;
-    if (processorCount > sequenceCount) {
-        MPI_Comm_split(MPI_COMM_WORLD, groupRank, rank, &communicator);
-    }
-
-
     int matchCounter[portion];
     int* foundMatches;
     int totalMatches = 0;
 
-    if (!manageMatches(portion, start, sequenceCount, &totalMatches,
-                       patternCount, matchCounter,&foundMatches,
-                       patternLengths, patterns, sequences)) {
+    int aux_processors = processorCount - sequenceCount;
+    MPI_Comm communicator = MPI_COMM_WORLD;
+    if (aux_processors > 0) {
+        MPI_Comm_split(MPI_COMM_WORLD, groupRank, rank, &communicator);
+    }
+
+    if (!manageMatches(groupRank < aux_processors, portion, start, sequenceCount,
+                       &totalMatches, patternCount, matchCounter,
+                       &foundMatches, patternLengths, patterns,
+                       sequences, communicator)) {
         free_pattern_arrays(patterns, patternLengths,sequenceCount,
                             sequenceCount, patternCount);
         free_full_2DArray((void**) sequences, portion);
@@ -525,18 +596,12 @@ int main(int argc, char** argv) {
         }
     }
     else {
+        if (rank >= processorCount) totalMatches = 0;
         MPI_Gatherv(foundMatches, totalMatches, MPI_INT, NULL,
                     NULL, NULL, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Finalize();
+        return -1;
     }
-
-//    int k = 0;
-//    for (int i = 0; i < portion; i++) {
-//        for (int j = 0; j < matchCounter[i]; j++) {
-//            printf("Match[%d]: %d\t", j, foundMatches[k]);
-//            k++;
-//        }
-//        printf("\n");
-//    }
 
     free_pattern_arrays(patterns, patternLengths, sequenceCount,
                         sequenceCount, patternCount);
