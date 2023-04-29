@@ -17,6 +17,8 @@ int getSequenceData(FILE* file, int* sequenceCount, int* maxSequenceLength) {
 
 void getDistributions(int *start, int *portion, int *remainder, int size,
                       int processorCount, int rank) {
+    /* This function has been taken from the MPI implementation of Bucketsort ..-
+     * -.. within the same project. */
     (*portion) = size/processorCount;
     (*remainder) = size % processorCount;
     if (rank < (*remainder)) { // Spread remainder evenly across processors
@@ -73,11 +75,6 @@ void free_pattern_arrays(char*** patterns, size_t* patternLengths,
     }
     free_full_2DArray((void**) patterns, size);
     free(patternLengths);
-}
-
-FILE* getFile(char* fileName) {
-    FILE* file = fopen(fileName, "r");
-    return file;
 }
 
 int distinguishPatterns(FILE* file, char*** patterns, size_t* patternLengths,
@@ -203,13 +200,13 @@ int parseSequences(FILE* file, char** sequences, int sequenceCount, int maxSeque
     for (int i = 0; i < sequenceCount; i++) {
         fscanf(file, "%s", seqBuffer);
         currentLength = strlen(seqBuffer);
-        sequences[i] = (char*) malloc(currentLength * sizeof(char));
+        sequences[i] = (char*) malloc((currentLength+1) * sizeof(char));
         if (!sequences[i]) {
             free_full_2DArray((void**) sequences, i); // Free all up to i
             return 0;
         }
         seqBuffer[currentLength] = '\0';
-        strncpy(sequences[i], seqBuffer, currentLength+1);
+        strncpy(sequences[i], seqBuffer, (currentLength+1));
     }
     return 1;
 }
@@ -339,6 +336,10 @@ int parallel_manageMatches(MPI_Comm communicator, char*** patterns,
                    communicator);
         matchCounter[0] = *totalMatches;
         *foundMatches = (int*) realloc(*foundMatches, matchCounter[0]*sizeof(int));
+        if (!*foundMatches && matchCounter[0]) {
+            // FREE THINGS HERE
+            return 0;
+        }
         int* displs = (int*) malloc(processorCount * sizeof(int));
         getDispls(&displs, matchesFound, processorCount);
         MPI_Gatherv(MPI_IN_PLACE, 0, MPI_INT, *foundMatches, matchesFound,
@@ -409,9 +410,9 @@ int getCombinedCounts(int** combinedMatchCount, int** individualCounts,
                       int remainder, int sequenceCount,
                       int processorCount) {
     if (!rank) {
-        *combinedMatchCount = (int*) calloc(processorCount, sizeof(int));
+        *combinedMatchCount = (int*) calloc(sequenceCount, sizeof(int));
         if (*combinedMatchCount) {
-            *individualCounts = (int*) calloc(processorCount, sizeof(int));
+            *individualCounts = (int*) calloc(sequenceCount, sizeof(int));
             if (!*individualCounts) {
                 free(*combinedMatchCount);
                 return 0;
@@ -429,7 +430,7 @@ int getCombinedCounts(int** combinedMatchCount, int** individualCounts,
                 recvcounts[i] = portion; // Rank 0 always accounts for remainder
             }
         }
-        for (int i = remainder; i < sequenceCount; i++) {
+        for (int i = remainder; i < processorCount; i++) {
             recvcounts[i] = noRemainder;
         }
         for (int i = sequenceCount; i < processorCount; i++) {
@@ -438,6 +439,11 @@ int getCombinedCounts(int** combinedMatchCount, int** individualCounts,
         }
 
         int* displs = (int*) malloc(processorCount * sizeof(int));
+        if (!displs) {
+            free(*combinedMatchCount);
+            free(*individualCounts);
+            return 0;
+        }
         getDispls(&displs, recvcounts, processorCount);
         MPI_Gatherv(matchCounter, portion, MPI_INT, (*combinedMatchCount),
                     recvcounts, displs, MPI_INT, 0, MPI_COMM_WORLD);
@@ -465,22 +471,12 @@ int getCombinedCounts(int** combinedMatchCount, int** individualCounts,
     }
 }
 
-
-int main(int argc, char** argv) {
-    FILE *file = getFile("sequences.txt");
-    if (!file) {
-        printf("File not found.\n");
-        return -1;
-    }
-
-    MPI_Init(&argc, &argv);
-
+int DNA_Search(FILE* file) {
     int sequenceCount = 0;
     int maxSequenceLength = 0;
 
     if (!getSequenceData(file, &sequenceCount, &maxSequenceLength)) {
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
 
 
@@ -499,46 +495,40 @@ int main(int argc, char** argv) {
     char*** patterns;
     size_t* patternLengths;
     if (!malloc_pattern_arrays(&patterns, &patternLengths, sequenceCount)) {
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
 
 
     // Rough estimation that all patterns include 3 variations.
     size_t estimatedPatternCount = 3;
     if (!malloc_pattern_array(patterns,estimatedPatternCount, sequenceCount)) {
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
 
     int patternCount[sequenceCount]; // Number of patterns for each sequence
     // Separate out pattern variations
     if (!distinguishPatterns(file, patterns, patternLengths, sequenceCount,
                              estimatedPatternCount, patternCount, rank)) {
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
 
     char** sequences = (char**) malloc(sequenceCount * sizeof(char*));
     if (!sequences) {
         free_pattern_arrays(patterns, patternLengths, sequenceCount,
                             sequenceCount, patternCount);
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
     // Fill "sequences" array with sequences found in the file.
     if (!parseSequences(file, sequences, sequenceCount, maxSequenceLength)) {
         free_pattern_arrays(patterns, patternLengths, sequenceCount,
                             sequenceCount, patternCount);
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
 
     if (!truncateSequences(&sequences, portion, start)) {
         free_pattern_arrays(patterns, patternLengths, sequenceCount,
                             sequenceCount, patternCount);
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
 
     int matchCounter[portion];
@@ -558,12 +548,12 @@ int main(int argc, char** argv) {
         free_pattern_arrays(patterns, patternLengths,sequenceCount,
                             sequenceCount, patternCount);
         free_full_2DArray((void**) sequences, portion);
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
 
     int *combinedCount;
     int *combinedIndividualMatches;
+
     if (!getCombinedCounts(&combinedCount, &combinedIndividualMatches, matchCounter,
                            rank, portion, remainder, sequenceCount,
                            processorCount)) {
@@ -571,8 +561,7 @@ int main(int argc, char** argv) {
                             sequenceCount, patternCount);
         free_full_2DArray((void**) sequences, portion);
         free(foundMatches);
-        MPI_Finalize();
-        return -1;
+        return 0;
     }
 
     if (!rank) {
@@ -586,23 +575,20 @@ int main(int argc, char** argv) {
         MPI_Gatherv(foundMatches, totalMatches, MPI_INT, combinedMatches,
                     combinedIndividualMatches, displs, MPI_INT, 0, MPI_COMM_WORLD);
         free(displs);
-        int k = 0;
-        for (int i = 0; i < sequenceCount; i++) {
-            printf("Occurrences found in sequence %d: %d\n", i+1, combinedCount[i]);
-            for (int j = 0; j < combinedCount[i]; j++) {
-                printf("Occurrence %d: Index %d\n", j+1, combinedMatches[k]);
-                k++;
-            }
-        }
+//        int k = 0;
+//        for (int i = 0; i < sequenceCount; i++) {
+//            printf("Occurrences found in sequence %d: %d\n", i+1, combinedCount[i]);
+//            for (int j = 0; j < combinedCount[i]; j++) {
+//                printf("Occurrence %d: Index %d\n", j+1, combinedMatches[k]);
+//                k++;
+//            }
+//        }
     }
     else {
         if (rank >= processorCount) totalMatches = 0;
         MPI_Gatherv(foundMatches, totalMatches, MPI_INT, NULL,
                     NULL, NULL, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Finalize();
-        return -1;
     }
-
     free_pattern_arrays(patterns, patternLengths, sequenceCount,
                         sequenceCount, patternCount);
     free_full_2DArray((void**) sequences, portion);
@@ -610,7 +596,38 @@ int main(int argc, char** argv) {
     if (!rank) {
         free(combinedCount);
         free(combinedIndividualMatches);
+        return 1;
     }
+    else {
+        return -1;
+    }
+}
+
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
+    FILE *file = fopen("test.txt", "r");
+    if (!file) {
+        printf("Input file not found.\n");
+        MPI_Abort(MPI_COMM_WORLD, MPI_ERR_BUFFER);
+        return 0;
+    }
+    int result;
+    double start, end;
+    start = MPI_Wtime();
+    result = DNA_Search(file);
+    end = MPI_Wtime();
+    if (!result) {
+        printf("An error has occurred.\n");
+        MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OP);
+        MPI_Finalize();
+        return -1;
+    } else if (result == -1) {
+        MPI_Finalize();
+        return 0;
+    }
+    printf("Time taken: %g\n", end - start);
+    FILE *f = fopen("times.txt", "a");
+    fprintf(f, "%g,", end - start);
     MPI_Finalize();
     return 0;
 }
