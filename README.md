@@ -3,7 +3,7 @@ Parallel implementation of a DNA searching algorithm using pattern matching in C
 
 
 File input format:
-
+```
 <number of sequences>
 <maximum sequence length>
 <pattern1>
@@ -16,3 +16,5 @@ File input format:
 <sequence3>
 ...
 <sequenceN>
+```
+All input is case-sensitive.
